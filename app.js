@@ -142,7 +142,9 @@
   const ui = {
     view: { x: -60, y: -60, scale: 1 },
     activeLineId: null,
-    sel: null, // { type: 'conn', id }
+    sel: { stations: new Set(), conns: new Set() },
+    marquee: null,
+    alt: false,
     editStation: null,
     drawing: null, // { from, path, lineId, replaceId }
     hover: null,
@@ -254,7 +256,7 @@
   function replaceDoc(d) {
     doc = d;
     ui.drawing = null;
-    if (ui.sel && !doc.connections.some((c) => c.id === ui.sel.id)) ui.sel = null;
+    pruneSel();
     if (ui.editStation && !stationById(ui.editStation)) closeStationPop();
     updateUndoButtons();
     loadMapFont();
@@ -284,20 +286,23 @@
   // ---------------------------------------------------------------------------
   // Grid routing
   // ---------------------------------------------------------------------------
-  // Unit steps from a to b (excluding a). Diagonals first, then straight; or an L when diagonals are off.
-  function route(a, b, diag) {
-    const out = [];
-    let x = a[0], y = a[1];
-    let guard = 0;
-    while ((x !== b[0] || y !== b[1]) && guard++ < 10000) {
-      const dx = Math.sign(b[0] - x), dy = Math.sign(b[1] - y);
-      if (dx && dy) {
-        if (diag) { x += dx; y += dy; }
-        else if (Math.abs(b[0] - x) >= Math.abs(b[1] - y)) x += dx;
-        else y += dy;
-      } else { x += dx; y += dy; }
-      out.push([x, y]);
+  // Unit steps from a to b (excluding a): a diagonal run and a straight run (or an L without diagonals).
+  // `flip` swaps which run comes first.
+  function route(a, b, diag, flip = false) {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const sx = Math.sign(dx), sy = Math.sign(dy), ax = Math.abs(dx), ay = Math.abs(dy);
+    let runs;
+    if (diag) {
+      const m = Math.min(ax, ay);
+      const D = [m, [sx, sy]], S = ax > ay ? [ax - m, [sx, 0]] : [ay - m, [0, sy]];
+      runs = flip ? [S, D] : [D, S];
+    } else {
+      const X = [ax, [sx, 0]], Y = [ay, [0, sy]];
+      runs = flip ? [Y, X] : [X, Y];
     }
+    const out = [];
+    let p = a;
+    for (const [n, d] of runs) for (let i = 0; i < n; i++) { p = [p[0] + d[0], p[1] + d[1]]; out.push(p); }
     return out;
   }
   // Append a step to a traced path, undoing backtracks and cutting loops.
@@ -614,50 +619,70 @@
   }
 
   function renderOverlay() {
-    const s = doc.style, G = s.gridSize;
+    const s = doc.style, G = s.gridSize, sc = ui.view.scale;
     let out = '';
-    const sc = ui.view.scale;
-    if (ui.sel?.type === 'conn') {
-      const g = ui.layout.geoms.get(ui.sel.id);
-      if (g) {
-        out += `<path d="${g.d}" fill="none" style="stroke:var(--accent)" stroke-opacity=".35" stroke-width="${g.line.width + 10}" stroke-linecap="round" stroke-linejoin="round"/>`;
-        out += `<path d="${g.d}" fill="none" style="stroke:var(--accent)" stroke-width="${1.5 / sc}" stroke-dasharray="${4 / sc} ${3 / sc}"/>`;
-      }
+    for (const id of ui.sel.conns) {
+      const g = ui.layout.geoms.get(id);
+      if (g) out += `<path d="${g.d}" fill="none" style="stroke:var(--accent)" stroke-opacity=".35" stroke-width="${g.line.width + 10}" stroke-linecap="round" stroke-linejoin="round"/>`;
     }
-    if (ui.editStation) {
-      const st = stationById(ui.editStation);
-      const v = st && ui.layout.visuals.get(st.id);
-      if (v) {
-        const half = vlen(sub(v.a, v.b)) / 2;
-        out += `<circle cx="${rnd(v.center[0])}" cy="${rnd(v.center[1])}" r="${rnd(half + v.r + v.ow + 6)}" fill="none" style="stroke:var(--accent)" stroke-width="${2 / sc}"/>`;
-      }
+    const rings = new Set(ui.sel.stations);
+    if (ui.editStation) rings.add(ui.editStation);
+    for (const id of rings) {
+      const v = ui.layout.visuals.get(id);
+      if (!v) continue;
+      const half = vlen(sub(v.a, v.b)) / 2;
+      out += `<circle cx="${rnd(v.center[0])}" cy="${rnd(v.center[1])}" r="${rnd(half + v.r + v.ow + 5)}" fill="none" style="stroke:var(--accent)" stroke-width="${2.5 / sc}"/>`;
     }
     if (ui.drawing) {
-      const line = lineById(ui.drawing.lineId);
-      const path = ui.drawing.path;
+      const dr = ui.drawing;
+      const line = lineById(dr.lineId);
+      const path = previewPath();
       if (line && path.length >= 2) {
         const pts = offsetPolyline(path, new Array(path.length - 1).fill(0), G, s.cornerRadius * G);
-        out += `<g opacity=".8">${strokeSVG(roundedPath(pts), line.style === 'transfer' ? { ...line, style: 'solid', color: s.stationStroke } : line)}</g>`;
+        out += `<g opacity=".85">${strokeSVG(roundedPath(pts), line.style === 'transfer' ? { ...line, style: 'solid', color: s.stationStroke } : line)}</g>`;
       }
-      for (const p of path) out += `<circle cx="${p[0] * G}" cy="${p[1] * G}" r="${2.2 / sc}" style="fill:var(--accent)"/>`;
-      const end = path[path.length - 1];
-      out += `<circle cx="${end[0] * G}" cy="${end[1] * G}" r="${7 / sc}" fill="none" style="stroke:var(--accent)" stroke-width="${2 / sc}"/>`;
+      for (const wp of dr.waypoints) {
+        const r = 4.5 / sc;
+        out += `<rect x="${wp.p[0] * G - r}" y="${wp.p[1] * G - r}" width="${2 * r}" height="${2 * r}" rx="${1.5 / sc}" fill="#fff" style="stroke:var(--accent)" stroke-width="${2 / sc}"/>`;
+      }
+      if (dr.cursor) {
+        const onSt = stationAt(dr.cursor);
+        out += `<circle cx="${dr.cursor[0] * G}" cy="${dr.cursor[1] * G}" r="${(onSt ? 11 : 6) / sc}" fill="none" style="stroke:var(--accent)" stroke-width="${2 / sc}"/>`;
+      }
     } else if (ui.hover && !ui.drag) {
       const h = ui.hover;
       out += `<circle cx="${h[0] * G}" cy="${h[1] * G}" r="${4 / sc}" fill="none" style="stroke:var(--accent)" stroke-width="${1.5 / sc}" opacity=".8"/>`;
     }
-    overlay.innerHTML = out;
+    if (ui.marquee) {
+      const [x0, y0, x1, y1] = ui.marquee;
+      out += `<rect x="${x0}" y="${y0}" width="${x1 - x0}" height="${y1 - y0}" style="fill:var(--accent);stroke:var(--accent)" fill-opacity=".08" stroke-width="${1 / sc}"/>`;
+    }
+    let handles = '';
+    const c = !ui.drawing && singleConn();
+    if (c) {
+      for (const h of connHandles(c)) {
+        const cx = h.p[0] * G, cy = h.p[1] * G;
+        handles += h.kind === 'corner'
+          ? `<circle class="handle" data-handle="corner:${h.i}" cx="${cx}" cy="${cy}" r="${6 / sc}" fill="#fff" style="stroke:var(--accent)" stroke-width="${2.5 / sc}"><title>Drag to move · double-click to remove</title></circle>`
+          : `<g class="handle" data-handle="ghost:${h.i}"><title>Drag to add a bend</title><circle cx="${cx}" cy="${cy}" r="${5.5 / sc}" fill="#fff" fill-opacity=".9" style="stroke:var(--accent)" stroke-opacity=".7" stroke-width="${1.5 / sc}"/><path d="M${cx - 2.5 / sc} ${cy}h${5 / sc}M${cx} ${cy - 2.5 / sc}v${5 / sc}" style="stroke:var(--accent)" stroke-width="${1.5 / sc}"/></g>`;
+      }
+    }
+    overlay.innerHTML = `<g pointer-events="none">${out}</g>${handles}`;
   }
 
   function renderHint() {
     const el = $('#hint');
     if (ui.drawing) {
       const l = lineById(ui.drawing.lineId);
-      el.innerHTML = `<span class="dot" style="background:${l?.color}"></span><b>${esc(l?.name)}</b> · trace along the grid · <b>click</b> a station to finish (<b>⇧</b> to continue) · <b>right-click</b> to drop a station · <b>⌫</b> step back · <b>Esc</b> cancel`;
+      el.innerHTML = `<span class="dot" style="background:${l?.color}"></span><b>${esc(l?.name)}</b> · <b>click</b> to add waypoints · <b>double-click</b> a station to finish (or empty space for a new one) · hold <b>⌥/Alt</b> to flip the bend · <b>⌫</b> undo waypoint · <b>Esc</b> cancel`;
     } else if (!doc.stations.length) {
-      el.innerHTML = '<b>Right-click</b> anywhere on the grid to add your first station';
+      el.innerHTML = '<b>Double-click</b> or <b>right-click</b> the grid to add your first station';
+    } else if (singleConn()) {
+      el.innerHTML = '<b>Drag</b> a handle to reshape · drag a <b>＋</b> to add a bend · <b>double-click</b> a handle to remove it · <b>⌫</b> delete';
+    } else if (selCount()) {
+      el.innerHTML = '<b>Drag</b> or use <b>arrow keys</b> to move · <b>⌫</b> delete · <b>Enter</b> edit station · <b>Esc</b> deselect';
     } else {
-      el.innerHTML = '<b>Right-click</b> add / edit station · <b>Click</b> a station to draw a connection · <b>Drag</b> to move · <b>Scroll</b> to zoom';
+      el.innerHTML = '<b>Double-click</b> a station to draw a connection · <b>double-click</b> empty grid to add a station · <b>drag</b> to select · <b>scroll</b> to pan, <b>⌘/Ctrl+scroll</b> to zoom';
     }
   }
 
@@ -709,20 +734,59 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Selection
+  // ---------------------------------------------------------------------------
+  const emptySel = () => ({ stations: new Set(), conns: new Set() });
+  const selCount = () => ui.sel.stations.size + ui.sel.conns.size;
+  function setSel(stations = [], conns = []) {
+    ui.sel = { stations: new Set(stations), conns: new Set(conns) };
+    selChanged();
+  }
+  function selChanged() {
+    renderOverlay();
+    renderInspector();
+    renderHint();
+  }
+  function pruneSel() {
+    for (const id of ui.sel.stations) if (!stationById(id)) ui.sel.stations.delete(id);
+    for (const id of ui.sel.conns) if (!connById(id)) ui.sel.conns.delete(id);
+  }
+  function singleConn() {
+    return ui.sel.conns.size === 1 && !ui.sel.stations.size ? connById([...ui.sel.conns][0]) : null;
+  }
+  function singleStation() {
+    return ui.sel.stations.size === 1 && !ui.sel.conns.size ? stationById([...ui.sel.stations][0]) : null;
+  }
+  function toggleSel(kind, id) {
+    const set = ui.sel[kind];
+    set.has(id) ? set.delete(id) : set.add(id);
+    selChanged();
+  }
+  function selectAll() {
+    setSel(doc.stations.map((s) => s.id), doc.connections.map((c) => c.id));
+  }
+  function deleteSelection() {
+    if (!selCount()) return;
+    commit();
+    doc.connections = doc.connections.filter((c) => !ui.sel.conns.has(c.id));
+    for (const id of ui.sel.stations) if (stationById(id)) deleteStation(id);
+    ui.sel = emptySel();
+    if (ui.editStation) closeStationPop();
+    renderLines();
+    changed();
+  }
+
+  // ---------------------------------------------------------------------------
   // Editing operations
   // ---------------------------------------------------------------------------
   function snap(w) {
     const G = doc.style.gridSize;
     return [Math.round(w[0] / G), Math.round(w[1] / G)];
   }
-  function snapStrict(w) {
+  function stationAtPoint(w) {
     const G = doc.style.gridSize;
     const g = snap(w);
-    return vlen(sub(w, mul(g, G))) <= G * 0.42 ? g : null;
-  }
-  function stationAtPoint(w) {
-    const g = snapStrict(w);
-    const st = g && stationAt(g);
+    const st = vlen(sub(w, mul(g, G))) <= G * 0.42 && stationAt(g);
     if (st) return st;
     // Large interchange capsules can extend beyond the snap radius.
     for (const s of doc.stations) {
@@ -771,61 +835,160 @@
     }
     doc.connections = doc.connections.filter((c) => merged.has(c.id) || (c.from !== id && c.to !== id));
     doc.stations = doc.stations.filter((s) => s.id !== id);
-    if (ui.sel && !connById(ui.sel.id)) ui.sel = null;
+    pruneSel();
   }
 
-  function moveStation(st, g) {
-    const other = stationAt(g);
-    if (other && other !== st) return false;
-    if (st.x === g[0] && st.y === g[1]) return false;
-    const adjust = (path) => {
-      path.pop();
-      extendTo(path, g);
-    };
-    for (const c of doc.connections) {
-      if (c.from === st.id) { c.path.reverse(); adjust(c.path); c.path.reverse(); }
-      if (c.to === st.id) adjust(c.path);
+  // Corner points of a path (endpoints included): the waypoints that define its shape.
+  function corners(path) {
+    const out = [path[0]];
+    for (let i = 1; i < path.length - 1; i++) {
+      if (!eq(sub(path[i], path[i - 1]), sub(path[i + 1], path[i]))) out.push(path[i]);
     }
-    st.x = g[0];
-    st.y = g[1];
+    if (path.length > 1) out.push(path[path.length - 1]);
+    return out;
+  }
+  // Append a routed run to `path`, folding immediate backtracks.
+  function appendRoute(path, target, flip = false) {
+    for (const p of route(path[path.length - 1], target, doc.style.allowDiagonals, flip)) {
+      const n = path.length;
+      if (n >= 2 && eq(path[n - 2], p)) path.pop();
+      else path.push(p);
+    }
+  }
+  function pathFromCorners(C) {
+    const path = [C[0].slice()];
+    for (let i = 1; i < C.length; i++) appendRoute(path, C[i]);
+    return path;
+  }
+  // Waypoint handles for a selected connection: its corners, plus "add a bend" handles mid-run.
+  function connHandles(c) {
+    const p = c.path, idx = [];
+    for (let i = 0; i < p.length; i++) {
+      if (i === 0 || i === p.length - 1 || !eq(sub(p[i], p[i - 1]), sub(p[i + 1], p[i]))) idx.push(i);
+    }
+    const hs = [];
+    for (let i = 0; i < idx.length; i++) {
+      if (i > 0 && i < idx.length - 1) hs.push({ p: p[idx[i]], kind: 'corner', i });
+      if (i < idx.length - 1 && idx[i + 1] - idx[i] >= 2) hs.push({ p: p[Math.floor((idx[i] + idx[i + 1]) / 2)], kind: 'ghost', i: i + 1 });
+    }
+    return hs;
+  }
+
+  // Moving stations: snapshot positions/paths once, then re-apply from the snapshot for every delta.
+  function beginMove() {
+    return {
+      stations: new Map([...ui.sel.stations].map((id) => { const s = stationById(id); return [id, [s.x, s.y]]; })),
+      paths: new Map(doc.connections.map((c) => [c.id, c.path.map((p) => p.slice())])),
+    };
+  }
+  function applyMove(orig, dg) {
+    const moving = ui.sel.stations;
+    for (const p of orig.stations.values()) {
+      const t = [p[0] + dg[0], p[1] + dg[1]];
+      if (doc.stations.some((s) => !moving.has(s.id) && s.x === t[0] && s.y === t[1])) return false;
+    }
+    for (const [id, p] of orig.stations) Object.assign(stationById(id), { x: p[0] + dg[0], y: p[1] + dg[1] });
+    for (const c of doc.connections) {
+      const op = orig.paths.get(c.id);
+      if (!op) continue;
+      const a = moving.has(c.from), b = moving.has(c.to);
+      if (a && b) { c.path = op.map((p) => [p[0] + dg[0], p[1] + dg[1]]); continue; }
+      let path = op.map((p) => p.slice());
+      if (a || b) {
+        if (a) path.reverse();
+        const st = stationById(a ? c.from : c.to);
+        // Drop the final straight run and re-route from the last bend to the new spot.
+        let k = path.length - 1;
+        const last = sub(path[k], path[k - 1]);
+        while (k > 1 && eq(sub(path[k - 1], path[k - 2]), last)) k--;
+        path = path.slice(0, k);
+        extendTo(path, [st.x, st.y]);
+        if (a) path.reverse();
+      }
+      c.path = path;
+    }
     return true;
   }
+  function nudge(dx, dy) {
+    if (!ui.sel.stations.size) return;
+    commit();
+    if (applyMove(beginMove(), [dx, dy])) changed();
+    else history.undo.pop();
+  }
 
+  // ---------------------------------------------------------------------------
+  // Drawing connections: double-click a station, click to add waypoints, double-click to finish
+  // ---------------------------------------------------------------------------
   function startDrawing(stationId, opts = {}) {
     const st = stationById(stationId);
     const line = opts.lineId ? lineById(opts.lineId) : activeLine();
     if (!st) return;
     if (!line) { toast('Add a line first'); switchTab('lines'); return; }
-    ui.sel = opts.replaceId ? { type: 'conn', id: opts.replaceId } : null;
-    ui.drawing = { from: st.id, path: [[st.x, st.y]], lineId: line.id, replaceId: opts.replaceId || null };
+    if (ui.editStation) closeStationPop();
+    ui.sel = emptySel();
+    ui.drawing = { from: st.id, path: [[st.x, st.y]], waypoints: [{ p: [st.x, st.y], path: [[st.x, st.y]] }], lineId: line.id, replaceId: opts.replaceId || null, cursor: null };
     svg.classList.add('drawing');
-    renderOverlay();
-    renderInspector();
-    renderHint();
+    selChanged();
   }
   function cancelDrawing() {
     ui.drawing = null;
     svg.classList.remove('drawing');
-    renderOverlay();
-    renderInspector();
-    renderHint();
+    selChanged();
   }
-  function finishDrawing(st, chain, skipCommit) {
+  function previewPath() {
     const dr = ui.drawing;
-    const path = dr.path.slice();
-    extendTo(path, [st.x, st.y]);
-    if (!eq(path[path.length - 1], [st.x, st.y]) || path.length < 2 || st.id === dr.from) { cancelDrawing(); return; }
+    const path = dr.path.map((p) => p.slice());
+    if (dr.cursor) appendRoute(path, dr.cursor, ui.alt);
+    return path;
+  }
+  function addWaypoint(g) {
+    const dr = ui.drawing;
+    if (eq(dr.path[dr.path.length - 1], g)) return;
+    appendRoute(dr.path, g, ui.alt);
+    dr.waypoints.push({ p: g, path: dr.path.map((p) => p.slice()) });
+  }
+  function removeWaypoint() {
+    const dr = ui.drawing;
+    if (dr.waypoints.length <= 1) { cancelDrawing(); return; }
+    dr.waypoints.pop();
+    dr.path = dr.waypoints[dr.waypoints.length - 1].path.map((p) => p.slice());
+    renderOverlay();
+  }
+  function finishDrawing(st, skipCommit) {
+    const dr = ui.drawing;
+    addWaypoint([st.x, st.y]);
+    const path = dr.path;
+    if (st.id === dr.from || path.length < 2 || !eq(path[path.length - 1], [st.x, st.y])) {
+      if (st.id === dr.from) toast('A connection needs two different stations');
+      cancelDrawing();
+      return false;
+    }
     if (!skipCommit) commit();
-    if (dr.replaceId && connById(dr.replaceId)) {
-      Object.assign(connById(dr.replaceId), { path, to: st.id, from: dr.from });
+    let id = dr.replaceId;
+    if (id && connById(id)) {
+      Object.assign(connById(id), { path, to: st.id, from: dr.from });
     } else {
-      doc.connections.push({ id: uid(), lineId: dr.lineId, from: dr.from, to: st.id, path });
+      id = uid();
+      doc.connections.push({ id, lineId: dr.lineId, from: dr.from, to: st.id, path });
     }
     ui.drawing = null;
     svg.classList.remove('drawing');
+    ui.sel = { stations: new Set(), conns: new Set([id]) };
     renderLines();
     changed();
-    if (chain) startDrawing(st.id, { lineId: dr.lineId });
+    return true;
+  }
+  // Finish at grid point g: on the station there, or on a new station created there.
+  function finishAt(g) {
+    const dr = ui.drawing;
+    let st = stationAt(g);
+    if (st && st.id === dr.from && dr.path.length === 1) { cancelDrawing(); return; }
+    commit();
+    const isNew = !st;
+    if (!st) st = createStation(g);
+    const ok = finishDrawing(st, true);
+    if (!ok && isNew) { doc.stations = doc.stations.filter((s) => s !== st); history.undo.pop(); updateUndoButtons(); render(); }
+    if (ok && isNew) openStationPop(st, true);
   }
 
   // Connections that share at least one grid edge with `c`.
@@ -857,7 +1020,7 @@
   // Pointer interaction
   // ---------------------------------------------------------------------------
   svg.addEventListener('pointerdown', (e) => {
-    if (!$('#stationPop').hidden) closeStationPop();
+    if (!pop.hidden) closeStationPop();
     const w = toWorld(e);
     if (e.button === 1 || (e.button === 0 && ui.space)) {
       e.preventDefault();
@@ -865,38 +1028,51 @@
       return;
     }
     if (e.button !== 0) return;
+    const capture = () => svg.setPointerCapture(e.pointerId);
+
     if (ui.drawing) {
       const st = stationAtPoint(w);
-      if (st && st.id !== ui.drawing.from) finishDrawing(st, e.shiftKey);
-      else if (st && st.id === ui.drawing.from && ui.drawing.path.length === 1) cancelDrawing();
+      addWaypoint(st ? [st.x, st.y] : snap(w));
+      renderOverlay();
       return;
     }
-    const leg = e.target.closest?.('[data-legend]');
-    if (leg) {
-      ui.drag = { type: 'legend', start: [e.clientX, e.clientY], origin: [doc.legend.x, doc.legend.y], committed: false };
-      svg.setPointerCapture(e.pointerId);
+    const handle = e.target.closest?.('[data-handle]');
+    const c = singleConn();
+    if (handle && c) {
+      const [kind, i] = handle.dataset.handle.split(':');
+      ui.drag = { type: 'handle', conn: c, C: corners(c.path).map((p) => p.slice()), kind, i: +i, start: [e.clientX, e.clientY], last: null };
+      capture();
+      return;
+    }
+    if (e.target.closest?.('[data-legend]')) {
+      ui.drag = { type: 'legend', start: [e.clientX, e.clientY], origin: [doc.legend.x, doc.legend.y] };
+      capture();
       return;
     }
     const st = stationAtPoint(w);
     if (st) {
-      ui.drag = { type: 'station', id: st.id, start: [e.clientX, e.clientY], moved: false };
-      svg.setPointerCapture(e.pointerId);
+      if (e.shiftKey || e.metaKey || e.ctrlKey) { toggleSel('stations', st.id); return; }
+      const wasSelected = ui.sel.stations.has(st.id);
+      if (!wasSelected) setSel([st.id]);
+      ui.drag = { type: 'move', id: st.id, wasSelected, start: [e.clientX, e.clientY], g0: [st.x, st.y], dg: [0, 0] };
+      capture();
       return;
     }
     const hit = e.target.closest?.('[data-conn]');
     if (hit) {
-      ui.sel = { type: 'conn', id: hit.dataset.conn };
-      const c = connById(ui.sel.id);
-      if (c) { ui.activeLineId = c.lineId; renderLines(); }
-      renderOverlay();
-      renderInspector();
+      const id = hit.dataset.conn;
+      if (e.shiftKey || e.metaKey || e.ctrlKey) { toggleSel('conns', id); return; }
+      setSel([], [id]);
+      const cc = connById(id);
+      if (cc && cc.lineId !== ui.activeLineId) setActiveLine(cc.lineId);
       return;
     }
-    startPan(e, true);
+    ui.drag = { type: 'marquee', start: [e.clientX, e.clientY], w0: w, additive: e.shiftKey || e.metaKey || e.ctrlKey, base: ui.sel };
+    capture();
   });
 
-  function startPan(e, deselectOnClick = false) {
-    ui.drag = { type: 'pan', start: [e.clientX, e.clientY], origin: [ui.view.x, ui.view.y], moved: false, deselectOnClick };
+  function startPan(e) {
+    ui.drag = { type: 'pan', start: [e.clientX, e.clientY], origin: [ui.view.x, ui.view.y] };
     svg.classList.add('panning');
     svg.setPointerCapture(e.pointerId);
   }
@@ -911,85 +1087,137 @@
         ui.view.x = d.origin[0] - dx / ui.view.scale;
         ui.view.y = d.origin[1] - dy / ui.view.scale;
         applyView();
-        return;
-      }
-      if (d.type === 'legend') {
+      } else if (d.type === 'legend' && d.moved) {
         if (!d.committed) { commit(); d.committed = true; }
         const G = doc.style.gridSize / 2;
         doc.legend.x = Math.round((d.origin[0] + dx / ui.view.scale) / G) * G;
         doc.legend.y = Math.round((d.origin[1] + dy / ui.view.scale) / G) * G;
         changed();
-        return;
-      }
-      if (d.type === 'station' && d.moved) {
-        const st = stationById(d.id);
+      } else if (d.type === 'move' && d.moved) {
+        if (!d.orig) { commit(); d.orig = beginMove(); svg.classList.add('moving'); }
         const g = snap(w);
-        if (!d.committedMove) { commit(); d.committedMove = true; svg.classList.add('moving'); }
-        if (st && moveStation(st, g)) changed();
-        return;
+        const dg = [g[0] - d.g0[0], g[1] - d.g0[1]];
+        if (!eq(dg, d.dg) && applyMove(d.orig, dg)) { d.dg = dg; changed(); }
+      } else if (d.type === 'handle' && d.moved) {
+        const g = snap(w);
+        if (d.last && eq(g, d.last)) return;
+        d.last = g;
+        const C = d.C.map((p) => p.slice());
+        if (d.kind === 'corner') C[d.i] = g; else C.splice(d.i, 0, g);
+        const clean = C.filter((p, i) => i === 0 || !eq(p, C[i - 1]));
+        const path = pathFromCorners(clean);
+        if (path.length < 2) return;
+        if (!d.committed) { commit(); d.committed = true; }
+        d.conn.path = path;
+        changed();
+      } else if (d.type === 'marquee' && d.moved) {
+        const x0 = Math.min(d.w0[0], w[0]), x1 = Math.max(d.w0[0], w[0]);
+        const y0 = Math.min(d.w0[1], w[1]), y1 = Math.max(d.w0[1], w[1]);
+        ui.marquee = [x0, y0, x1, y1];
+        const G = doc.style.gridSize;
+        const inside = (p) => p[0] * G >= x0 && p[0] * G <= x1 && p[1] * G >= y0 && p[1] * G <= y1;
+        const st = doc.stations.filter((s) => inside([s.x, s.y])).map((s) => s.id);
+        const cs = doc.connections.filter((c) => c.path.every(inside)).map((c) => c.id);
+        ui.sel = d.additive
+          ? { stations: new Set([...d.base.stations, ...st]), conns: new Set([...d.base.conns, ...cs]) }
+          : { stations: new Set(st), conns: new Set(cs) };
+        renderOverlay();
       }
       return;
     }
     const prevHover = ui.hover;
     ui.hover = snap(w);
     if (ui.drawing) {
-      const g = snapStrict(w);
-      const path = ui.drawing.path;
-      if (g && !eq(g, path[path.length - 1])) {
-        extendTo(path, g);
-        renderOverlay();
-      }
+      const g = snap(w);
+      if (!ui.drawing.cursor || !eq(g, ui.drawing.cursor)) { ui.drawing.cursor = g; renderOverlay(); }
       return;
     }
-    svg.classList.toggle('on-station', !!stationAtPoint(w));
+    const overHandle = !!e.target.closest?.('[data-handle]');
+    svg.classList.toggle('on-station', !overHandle && !!stationAtPoint(w));
     if (!prevHover || !eq(prevHover, ui.hover)) renderOverlay();
   });
 
-  svg.addEventListener('pointerup', (e) => {
+  svg.addEventListener('pointerup', () => {
     const d = ui.drag;
     ui.drag = null;
     svg.classList.remove('panning', 'moving');
     if (!d) return;
-    if (d.type === 'pan') {
-      if (!d.moved && d.deselectOnClick && ui.sel) { ui.sel = null; renderOverlay(); renderInspector(); }
-      saveUI();
-    } else if (d.type === 'station' && !d.moved) {
-      startDrawing(d.id);
+    if (d.type === 'pan') saveUI();
+    else if (d.type === 'marquee') {
+      ui.marquee = null;
+      if (!d.moved && !d.additive) ui.sel = emptySel();
+      selChanged();
+    } else if (d.type === 'move' && !d.moved && d.wasSelected && selCount() > 1) {
+      setSel([d.id]);
+    } else if (d.type === 'handle') {
+      renderOverlay();
     }
   });
   svg.addEventListener('pointerleave', () => {
     if (!ui.drag && !ui.drawing) { ui.hover = null; renderOverlay(); }
   });
 
+  svg.addEventListener('dblclick', (e) => {
+    const w = toWorld(e);
+    if (ui.drawing) {
+      const st = stationAtPoint(w);
+      finishAt(st ? [st.x, st.y] : snap(w));
+      return;
+    }
+    const handle = e.target.closest?.('[data-handle]');
+    const c = singleConn();
+    if (handle && c) {
+      const [kind, i] = handle.dataset.handle.split(':');
+      if (kind !== 'corner') return;
+      const C = corners(c.path);
+      C.splice(+i, 1);
+      const path = pathFromCorners(C.filter((p, k) => k === 0 || !eq(p, C[k - 1])));
+      if (path.length < 2) return;
+      commit();
+      c.path = path;
+      changed();
+      return;
+    }
+    const st = stationAtPoint(w);
+    if (st) { startDrawing(st.id); return; }
+    if (e.target.closest?.('[data-conn]') || e.target.closest?.('[data-legend]')) return;
+    commit();
+    const ns = createStation(snap(w));
+    setSel([ns.id]);
+    changed();
+    openStationPop(ns, true);
+  });
+
   svg.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     const w = toWorld(e);
     const g = snap(w);
-    let st = stationAtPoint(w) || stationAt(g);
-    if (ui.drawing) {
-      if (st && st.id === ui.drawing.from) { cancelDrawing(); return; }
-      commit();
-      const isNew = !st;
-      if (!st) st = createStation(g);
-      finishDrawing(st, false, true);
-      if (isNew) openStationPop(st, true);
-      return;
-    }
+    const st = stationAtPoint(w) || stationAt(g);
+    if (ui.drawing) { finishAt(st ? [st.x, st.y] : g); return; }
     if (st) {
       openStationPop(st, false);
     } else {
       commit();
-      st = createStation(g);
+      const ns = createStation(g);
       changed();
-      openStationPop(st, true);
+      openStationPop(ns, true);
     }
   });
 
+  // Trackpad-friendly: scroll pans, pinch or ⌘/Ctrl+scroll zooms.
   svg.addEventListener('wheel', (e) => {
     e.preventDefault();
     const r = svg.getBoundingClientRect();
-    const k = e.ctrlKey ? 0.01 : 0.0015;
-    zoomAt(Math.exp(-e.deltaY * k), e.clientX - r.left, e.clientY - r.top);
+    if (e.ctrlKey || e.metaKey) {
+      zoomAt(Math.exp(-e.deltaY * (e.ctrlKey && !e.metaKey ? 0.01 : 0.002)), e.clientX - r.left, e.clientY - r.top);
+    } else {
+      const k = e.deltaMode === 1 ? 16 : 1;
+      ui.view.x += (e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX) * k / ui.view.scale;
+      ui.view.y += (e.shiftKey && !e.deltaX ? 0 : e.deltaY) * k / ui.view.scale;
+      applyView();
+      clearTimeout(ui.wheelSave);
+      ui.wheelSave = setTimeout(saveUI, 300);
+    }
   }, { passive: false });
 
   $('#stage').addEventListener('contextmenu', (e) => e.preventDefault());
@@ -1001,33 +1229,45 @@
 
   document.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
-    if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveFile(); return; }
-    if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); $('#fileInput').click(); return; }
-    if (mod && e.key.toLowerCase() === 'e') { e.preventDefault(); openExport(); return; }
+    const k = e.key.toLowerCase();
+    if (mod && k === 's') { e.preventDefault(); saveFile(); return; }
+    if (mod && k === 'o') { e.preventDefault(); $('#fileInput').click(); return; }
+    if (mod && k === 'e') { e.preventDefault(); openExport(); return; }
     if (e.key === 'Escape') {
-      if (!$('#stationPop').hidden) { closeStationPop(); return; }
+      if (!pop.hidden) { closeStationPop(); return; }
       if (typing(document.activeElement)) { document.activeElement.blur(); return; }
       if (ui.drawing) { cancelDrawing(); return; }
-      if (ui.sel) { ui.sel = null; renderOverlay(); renderInspector(); }
+      if (selCount()) setSel();
       return;
     }
-    if (typing(document.activeElement) || document.querySelector('dialog[open]')) return;
-    if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
-    if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
+    if (e.defaultPrevented || typing(e.target) || typing(document.activeElement) || document.querySelector('dialog[open]')) return;
+    if (e.key === 'Alt') { ui.alt = true; if (ui.drawing) renderOverlay(); return; }
+    if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+    if (mod && k === 'y') { e.preventDefault(); redo(); return; }
+    if (mod && k === 'a') { e.preventDefault(); if (!ui.drawing) selectAll(); return; }
     if (mod) return;
     if (e.key === ' ') { ui.space = true; e.preventDefault(); return; }
-    if (e.key === 'Backspace' && ui.drawing) {
+    if (e.key === 'Backspace' || e.key === 'Delete') {
       e.preventDefault();
-      if (ui.drawing.path.length > 1) { ui.drawing.path.pop(); renderOverlay(); } else cancelDrawing();
+      if (ui.drawing) removeWaypoint();
+      else deleteSelection();
       return;
     }
-    if ((e.key === 'Delete' || e.key === 'Backspace') && ui.sel?.type === 'conn') {
+    if (e.key === 'Enter') {
       e.preventDefault();
-      commit();
-      doc.connections = doc.connections.filter((c) => c.id !== ui.sel.id);
-      ui.sel = null;
-      renderLines();
-      changed();
+      if (ui.drawing) {
+        const dr = ui.drawing;
+        if (dr.cursor && !stationAt(dr.path[dr.path.length - 1])) addWaypoint(dr.cursor);
+        finishAt(dr.path[dr.path.length - 1]);
+      } else if (singleStation()) {
+        openStationPop(singleStation(), false);
+      }
+      return;
+    }
+    const arrows = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+    if (arrows[e.key] && ui.sel.stations.size && !ui.drawing) {
+      e.preventDefault();
+      nudge(...arrows[e.key]);
       return;
     }
     if (/^[1-9]$/.test(e.key)) {
@@ -1035,12 +1275,16 @@
       if (l) { setActiveLine(l.id); if (ui.drawing) { ui.drawing.lineId = l.id; renderOverlay(); renderHint(); } }
       return;
     }
-    if (e.key === 'f' || e.key === 'F') fitView();
+    if (k === 'f') fitView();
     if (e.key === '+' || e.key === '=') zoomAt(1.2);
     if (e.key === '-') zoomAt(1 / 1.2);
     if (e.key === '?') $('#helpDialog').showModal();
   });
-  document.addEventListener('keyup', (e) => { if (e.key === ' ') ui.space = false; });
+  document.addEventListener('keyup', (e) => {
+    if (e.key === ' ') ui.space = false;
+    if (e.key === 'Alt') { ui.alt = false; if (ui.drawing) renderOverlay(); }
+  });
+  window.addEventListener('blur', () => { ui.space = false; ui.alt = false; });
 
   // ---------------------------------------------------------------------------
   // Live-binding helper: one undo step per interaction
@@ -1075,7 +1319,7 @@
 
   function openStationPop(st, isNew) {
     ui.editStation = st.id;
-    if (ui.sel) { ui.sel = null; renderInspector(); }
+    if (!ui.sel.stations.has(st.id) || selCount() > 1) setSel([st.id]);
     $('#stName').value = st.name;
     $('#stType').value = st.type || 'auto';
     syncDirButtons(st);
@@ -1146,21 +1390,34 @@
   $$('[data-close]', pop).forEach((b) => b.addEventListener('click', closeStationPop));
 
   // ---------------------------------------------------------------------------
-  // Connection inspector
+  // Inspector (selection panel)
   // ---------------------------------------------------------------------------
+  const CLOSE_ICON = '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+  function dirButtonsHTML(active) {
+    return ['NW', 'N', 'NE', 'W', 'none', 'E', 'SW', 'S', 'SE'].map((dname) => `<button type="button" data-dir="${dname}" class="${dname === active ? 'active' : ''}" title="${dname === 'none' ? 'Hide label' : `Label ${dname}`}">${dname === 'none'
+      ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M7 17 17 7"/></svg>'
+      : `<svg viewBox="0 0 24 24"><g transform="rotate(${DIR_ANGLE[dname]} 12 12)"><path d="M12 19V5M6 11l6-6 6 6"/></g></svg>`}</button>`).join('');
+  }
+
   function renderInspector() {
     const el = $('#inspector');
-    const c = ui.sel?.type === 'conn' && connById(ui.sel.id);
-    if (!c || ui.drawing) { el.hidden = true; return; }
+    if (ui.drawing || !selCount()) { el.hidden = true; return; }
+    el.hidden = false;
+    const c = singleConn(), st = singleStation();
+    if (c) connInspector(el, c);
+    else if (st) stationInspector(el, st);
+    else multiInspector(el);
+    $('#inClose').onclick = () => setSel();
+  }
+
+  function connInspector(el, c) {
     const a = stationById(c.from), b = stationById(c.to);
     const { pos, size, shared } = bundleInfo(c);
     const idx = doc.connections.indexOf(c);
     const canPrev = doc.connections.slice(0, idx).some((x) => shared.has(x.id));
     const canNext = doc.connections.slice(idx + 1).some((x) => shared.has(x.id));
-    el.hidden = false;
     el.innerHTML = `
-      <div class="head"><strong>Connection</strong>
-        <button class="icon-btn small" id="inClose" title="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+      <div class="head"><strong>Connection</strong><button class="icon-btn small" id="inClose" title="Deselect (Esc)">${CLOSE_ICON}</button></div>
       <div class="route"><span>${esc(a?.name || '—')}</span><span class="arrow">→</span><span>${esc(b?.name || '—')}</span></div>
       <label class="field"><span>Line</span>
         <select id="inLine">${doc.lines.map((l) => `<option value="${l.id}" ${l.id === c.lineId ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></label>
@@ -1169,26 +1426,61 @@
           <button class="btn small" id="inPrev" ${canPrev ? '' : 'disabled'}>◀ Shift</button>
           <button class="btn small" id="inNext" ${canNext ? '' : 'disabled'}>Shift ▶</button>
         </div>
-        <span class="bundle-pos">${size > 1 ? `Track ${pos + 1} of ${size} where it runs alongside other links` : 'Not sharing a corridor with any other link'}</span>
+        <span class="bundle-pos">${size > 1 ? `Track ${pos + 1} of ${size} where it runs alongside other connections` : 'Not sharing a corridor with any other connection'}</span>
       </div>
       <div class="btn-row">
-        <button class="btn small" id="inRetrace" title="Trace a new path for this connection">Re-trace</button>
+        <button class="btn small" id="inRetrace" title="Draw a new path for this connection">Redraw</button>
         <button class="btn small" id="inReverse" title="Swap start and end">Reverse</button>
         <button class="btn small danger" id="inDelete">Delete</button>
       </div>`;
-    $('#inClose').onclick = () => { ui.sel = null; renderOverlay(); renderInspector(); };
-    $('#inLine').onchange = (e) => { commit(); c.lineId = e.target.value; ui.activeLineId = c.lineId; renderLines(); changed(); };
+    $('#inLine').onchange = (e) => { commit(); c.lineId = e.target.value; setActiveLine(c.lineId); changed(); };
     $('#inPrev').onclick = () => shiftInBundle(c, -1);
     $('#inNext').onclick = () => shiftInBundle(c, 1);
     $('#inRetrace').onclick = () => startDrawing(c.from, { replaceId: c.id, lineId: c.lineId });
     $('#inReverse').onclick = () => { commit(); [c.from, c.to] = [c.to, c.from]; c.path.reverse(); changed(); };
-    $('#inDelete').onclick = () => {
+    $('#inDelete').onclick = deleteSelection;
+  }
+
+  function stationInspector(el, st) {
+    const lineIds = [...new Set(doc.connections.filter((c) => c.from === st.id || c.to === st.id).map((c) => c.lineId))];
+    el.innerHTML = `
+      <div class="head"><strong>Station</strong><button class="icon-btn small" id="inClose" title="Deselect (Esc)">${CLOSE_ICON}</button></div>
+      <div class="route">${st.name.trim() ? esc(st.name).replace(/\n/g, ' ') : '<span class="muted">Unnamed</span>'}</div>
+      <div class="chip-row">${lineIds.map((id) => lineById(id)).filter(Boolean).map((l) => `<span class="chip"><i style="background:${l.color}"></i>${esc(l.name)}</span>`).join('') || '<span class="muted small">No connections yet</span>'}</div>
+      <div class="btn-row">
+        <button class="btn small" id="inEdit" title="Enter">Edit…</button>
+        <button class="btn small" id="inDraw" title="Or double-click the station">Draw connection</button>
+      </div>
+      <div class="btn-row"><button class="btn small danger" id="inDelete">Delete station</button></div>`;
+    $('#inEdit').onclick = () => openStationPop(st, false);
+    $('#inDraw').onclick = () => startDrawing(st.id);
+    $('#inDelete').onclick = deleteSelection;
+  }
+
+  function multiInspector(el) {
+    const ns = ui.sel.stations.size, nc = ui.sel.conns.size;
+    const parts = [ns && `${ns} station${ns === 1 ? '' : 's'}`, nc && `${nc} connection${nc === 1 ? '' : 's'}`].filter(Boolean).join(' · ');
+    el.innerHTML = `
+      <div class="head"><strong>Selection</strong><button class="icon-btn small" id="inClose" title="Deselect (Esc)">${CLOSE_ICON}</button></div>
+      <div class="route">${parts}</div>
+      ${nc ? `<label class="field"><span>Move connections to line</span><select id="inLine"><option value="">Choose a line…</option>${doc.lines.map((l) => `<option value="${l.id}">${esc(l.name)}</option>`).join('')}</select></label>` : ''}
+      ${ns ? `<div class="field"><span>Label position for all stations</span><div class="dir-grid" id="inDir">${dirButtonsHTML(null)}</div></div>` : ''}
+      <div class="btn-row"><button class="btn small danger" id="inDelete">Delete ${selCount()} item${selCount() === 1 ? '' : 's'}</button></div>`;
+    if (nc) $('#inLine').onchange = (e) => {
+      if (!e.target.value) return;
       commit();
-      doc.connections = doc.connections.filter((x) => x.id !== c.id);
-      ui.sel = null;
+      for (const id of ui.sel.conns) { const c = connById(id); if (c) c.lineId = e.target.value; }
       renderLines();
       changed();
     };
+    if (ns) $('#inDir').onclick = (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      commit();
+      for (const id of ui.sel.stations) { const s = stationById(id); if (s) s.labelDir = b.dataset.dir; }
+      changed();
+    };
+    $('#inDelete').onclick = deleteSelection;
   }
 
   // ---------------------------------------------------------------------------
@@ -1277,7 +1569,7 @@
       commit();
       doc.lines.splice(i, 1);
       doc.connections = doc.connections.filter((c) => c.lineId !== l.id);
-      if (ui.sel && !connById(ui.sel.id)) ui.sel = null;
+      pruneSel();
       ui.activeLineId = doc.lines[Math.min(i, doc.lines.length - 1)]?.id;
     } else if (act === 'up' || act === 'down') {
       const j = i + (act === 'up' ? -1 : 1);
@@ -1644,7 +1936,7 @@
     d.style = style;
     d.legend.x = 2 * style.gridSize;
     d.legend.y = 2 * style.gridSize;
-    ui.sel = null;
+    ui.sel = emptySel();
     replaceDoc(d);
     ui.view = { x: -60, y: -60, scale: 1 };
     applyView();
