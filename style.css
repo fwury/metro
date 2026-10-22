@@ -164,7 +164,12 @@ h3 + p { margin: 3px 0 0; }
 }
 .line-item.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .line-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; cursor: pointer; }
-.line-key { font-size: 10px; color: var(--muted); width: 12px; text-align: center; flex: none; }
+.grip { width: 16px; height: 26px; flex: none; display: grid; place-items: center; color: var(--muted); cursor: grab; touch-action: none; margin: 0 -2px 0 -4px; border-radius: 5px; }
+.grip:hover { color: var(--text); background: var(--panel-2); }
+.grip svg { width: 14px; height: 14px; fill: currentColor; }
+.line-item { transition: transform .15s ease, border-color .12s, box-shadow .12s; position: relative; }
+.line-item.dragging { transition: none; z-index: 2; box-shadow: var(--shadow); cursor: grabbing; }
+body.reordering, body.reordering * { cursor: grabbing !important; user-select: none; }
 .swatch {
   position: relative; width: 26px; height: 26px; border-radius: 7px; flex: none; overflow: hidden;
   box-shadow: inset 0 0 0 1px rgba(0,0,0,.12);
@@ -272,6 +277,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .popover { position: fixed; width: 300px; padding: 14px; z-index: 20; display: grid; gap: 12px; }
 .pop-head { display: flex; align-items: center; justify-content: space-between; margin: -4px -4px 0 0; }
 .pop-actions { display: flex; justify-content: space-between; gap: 8px; }
+.pop-right { display: flex; gap: 6px; }
+[data-station] { cursor: pointer; }
 .dir-grid { display: grid; grid-template-columns: repeat(3, 30px); gap: 3px; }
 .dir-grid button {
   width: 30px; height: 30px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--panel);

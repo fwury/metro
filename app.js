@@ -341,15 +341,43 @@
         edges.get(ek).push({ c, k, sign });
       }
     }
-    for (const list of edges.values()) {
-      if (list.length < 2) continue;
-      const ws = list.map((e) => lines.get(e.c.lineId).width);
-      const total = ws.reduce((a, b) => a + b, 0) + gap * (list.length - 1);
+    // Orient every edge so that the "left" side stays on the same side as lines travel around
+    // bends: consecutive edges of a path get matching orientations (union-find with parity).
+    // Without this, a bundle turning against the canonical direction swaps sides and crosses.
+    const parent = new Map(), parity = new Map();
+    const find = (x) => {
+      if (!parent.has(x)) { parent.set(x, x); parity.set(x, 1); }
+      let p = 1, r = x;
+      while (parent.get(r) !== r) { p *= parity.get(r); r = parent.get(r); }
+      return [r, p];
+    };
+    for (const c of conns) {
+      if (lines.get(c.lineId).style === 'transfer') continue;
+      for (let k = 0; k < c.path.length - 2; k++) {
+        const [e1, s1] = edgeKey(c.path[k], c.path[k + 1]);
+        const [e2, s2] = edgeKey(c.path[k + 1], c.path[k + 2]);
+        const [r1, p1] = find(e1), [r2, p2] = find(e2);
+        if (r1 !== r2) { parent.set(r2, r1); parity.set(r2, p1 * p2 * s1 * s2); }
+      }
+    }
+    for (const [ek, list] of edges) {
+      const orient = find(ek)[1];
+      // Slots across the corridor; connections of a line with merged branches share one slot.
+      const slots = [];
+      const byLine = new Map();
+      for (const e of list) {
+        const line = lines.get(e.c.lineId);
+        let slot = line.merge ? byLine.get(line.id) : null;
+        if (!slot) { slot = { w: line.width, entries: [] }; slots.push(slot); if (line.merge) byLine.set(line.id, slot); }
+        slot.entries.push(e);
+      }
+      if (slots.length < 2) continue;
+      const total = slots.reduce((a, sl) => a + sl.w, 0) + gap * (slots.length - 1);
       let acc = -total / 2;
-      list.forEach((e, i) => {
-        offsets.get(e.c.id)[e.k] = (acc + ws[i] / 2) * e.sign;
-        acc += ws[i] + gap;
-      });
+      for (const sl of slots) {
+        for (const e of sl.entries) offsets.get(e.c.id)[e.k] = (acc + sl.w / 2) * e.sign * orient;
+        acc += sl.w + gap;
+      }
     }
 
     const geoms = new Map();
@@ -504,7 +532,7 @@
         outlines.push(capsule(v.a, v.b, v.r + v.ow, v.color));
         fills.push(capsule(v.a, v.b, v.r, s.stationFill));
       }
-      labels.push(labelSVG(st, v));
+      labels.push(labelSVG(st, v, editor));
     }
     return `<g class="lines">${linesOut.join('')}</g>`
       + (editor ? `<g class="hits">${hits.join('')}</g>` : '')
@@ -519,7 +547,7 @@
     return `font-family="${fontStack()}" font-size="${rnd(size)}" font-weight="${weight}" letter-spacing="${s.letterSpacing}" fill="${s.labelColor}"${halo}`;
   }
 
-  function labelSVG(st, v) {
+  function labelSVG(st, v, editor) {
     const s = doc.style;
     if (!st.name || !st.name.trim() || st.labelDir === 'none') return '';
     const dv = DIRS[st.labelDir] || DIRS.E;
@@ -538,7 +566,7 @@
     else if (dv[1] > 0) y0 = ay + fs * 0.76;
     else y0 = ay - ((rows.length - 1) * lh) / 2 + fs * 0.36;
     const spans = rows.map((t, i) => `<tspan x="${rnd(ax)}" y="${rnd(y0 + i * lh)}">${esc(t)}</tspan>`).join('');
-    return `<text text-anchor="${anchor}" ${textAttrs(fs)}>${spans}</text>`;
+    return `<text text-anchor="${anchor}" ${textAttrs(fs)}${editor ? ` data-station="${st.id}"` : ''}>${spans}</text>`;
   }
 
   const measureCtx = document.createElement('canvas').getContext('2d');
@@ -637,6 +665,8 @@
       const dr = ui.drawing;
       const line = lineById(dr.lineId);
       const path = previewPath();
+      const old = dr.replaceId && ui.layout.geoms.get(dr.replaceId);
+      if (old) out += `<path d="${old.d}" fill="none" style="stroke:var(--accent)" stroke-opacity=".5" stroke-width="${2 / sc}" stroke-dasharray="${5 / sc} ${4 / sc}"/>`;
       if (line && path.length >= 2) {
         const pts = offsetPolyline(path, new Array(path.length - 1).fill(0), G, s.cornerRadius * G);
         out += `<g opacity=".85">${strokeSVG(roundedPath(pts), line.style === 'transfer' ? { ...line, style: 'solid', color: s.stationStroke } : line)}</g>`;
@@ -674,15 +704,19 @@
     const el = $('#hint');
     if (ui.drawing) {
       const l = lineById(ui.drawing.lineId);
+      if (ui.drawing.target) {
+        el.innerHTML = `<span class="dot" style="background:${l?.color}"></span>Editing path · <b>⌫</b> remove waypoints · <b>click</b> to add · <b>double-click</b> a station or <b>Enter</b> to finish at ${esc(stationById(ui.drawing.target)?.name)} · <b>Esc</b> cancel`;
+        return;
+      }
       el.innerHTML = `<span class="dot" style="background:${l?.color}"></span><b>${esc(l?.name)}</b> · <b>click</b> to add waypoints · <b>double-click</b> a station to finish (or empty space for a new one) · hold <b>⌥/Alt</b> to flip the bend · <b>⌫</b> undo waypoint · <b>Esc</b> cancel`;
     } else if (!doc.stations.length) {
-      el.innerHTML = '<b>Double-click</b> or <b>right-click</b> the grid to add your first station';
+      el.innerHTML = '<b>Double-click</b>, <b>right-click</b> or <b>⇧-click</b> the grid to add your first station';
     } else if (singleConn()) {
-      el.innerHTML = '<b>Drag</b> a handle to reshape · drag a <b>＋</b> to add a bend · <b>double-click</b> a handle to remove it · <b>⌫</b> delete';
+      el.innerHTML = '<b>Drag</b> a handle to reshape · drag a <b>＋</b> to add a bend · <b>double-click</b> the line to edit its path · <b>⌫</b> delete';
     } else if (selCount()) {
-      el.innerHTML = '<b>Drag</b> or use <b>arrow keys</b> to move · <b>⌫</b> delete · <b>Enter</b> edit station · <b>Esc</b> deselect';
+      el.innerHTML = '<b>Drag</b> or use <b>arrow keys</b> to move · <b>⌘-click</b> to add to selection · <b>⌫</b> delete · <b>Esc</b> deselect';
     } else {
-      el.innerHTML = '<b>Double-click</b> a station to draw a connection · <b>double-click</b> empty grid to add a station · <b>drag</b> to select · <b>scroll</b> to pan, <b>⌘/Ctrl+scroll</b> to zoom';
+      el.innerHTML = '<b>Click</b> a station to edit it · <b>double-click</b> it to draw a connection · <b>⇧-click</b> or <b>right-click</b> to add a station · <b>drag</b> to select · <b>scroll</b> to pan, <b>⌘+scroll</b> to zoom';
     }
   }
 
@@ -985,10 +1019,19 @@
     if (st && st.id === dr.from && dr.path.length === 1) { cancelDrawing(); return; }
     commit();
     const isNew = !st;
-    if (!st) st = createStation(g);
+    if (!st) { st = createStation(g); splitConnectionsAt(st); }
     const ok = finishDrawing(st, true);
-    if (!ok && isNew) { doc.stations = doc.stations.filter((s) => s !== st); history.undo.pop(); updateUndoButtons(); render(); }
+    if (!ok && isNew) { doc = JSON.parse(history.undo.pop()); updateUndoButtons(); renderLines(); changed(); }
     if (ok && isNew) openStationPop(st, true);
+  }
+  // Re-enter drawing mode for an existing connection with its bends pre-placed as waypoints.
+  function editPath(c) {
+    if (!c) return;
+    startDrawing(c.from, { replaceId: c.id, lineId: c.lineId });
+    if (!ui.drawing) return;
+    for (const p of corners(c.path).slice(1, -1)) addWaypoint(p);
+    ui.drawing.target = c.to;
+    selChanged();
   }
 
   // Connections that share at least one grid edge with `c`.
@@ -1030,8 +1073,10 @@
     if (e.button !== 0) return;
     const capture = () => svg.setPointerCapture(e.pointerId);
 
+    clearTimeout(ui.popTimer);
     if (ui.drawing) {
-      const st = stationAtPoint(w);
+      if (e.shiftKey) { secondaryAt(e); return; }
+      const st = stationFromEvent(e, w);
       addWaypoint(st ? [st.x, st.y] : snap(w));
       renderOverlay();
       return;
@@ -1049,9 +1094,10 @@
       capture();
       return;
     }
-    const st = stationAtPoint(w);
+    const st = stationFromEvent(e, w);
     if (st) {
-      if (e.shiftKey || e.metaKey || e.ctrlKey) { toggleSel('stations', st.id); return; }
+      if (e.shiftKey) { secondaryAt(e); return; }
+      if (addKey(e)) { toggleSel('stations', st.id); return; }
       const wasSelected = ui.sel.stations.has(st.id);
       if (!wasSelected) setSel([st.id]);
       ui.drag = { type: 'move', id: st.id, wasSelected, start: [e.clientX, e.clientY], g0: [st.x, st.y], dg: [0, 0] };
@@ -1060,16 +1106,54 @@
     }
     const hit = e.target.closest?.('[data-conn]');
     if (hit) {
+      if (e.shiftKey) { secondaryAt(e); return; }
       const id = hit.dataset.conn;
-      if (e.shiftKey || e.metaKey || e.ctrlKey) { toggleSel('conns', id); return; }
+      if (addKey(e)) { toggleSel('conns', id); return; }
       setSel([], [id]);
       const cc = connById(id);
       if (cc && cc.lineId !== ui.activeLineId) setActiveLine(cc.lineId);
       return;
     }
-    ui.drag = { type: 'marquee', start: [e.clientX, e.clientY], w0: w, additive: e.shiftKey || e.metaKey || e.ctrlKey, base: ui.sel };
+    ui.drag = { type: 'marquee', start: [e.clientX, e.clientY], w0: w, shift: e.shiftKey, additive: e.shiftKey || addKey(e), base: ui.sel };
     capture();
   });
+
+  const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+  // Cmd-click (Ctrl-click elsewhere) toggles selection; on a Mac, Ctrl-click is a right-click.
+  const addKey = (e) => (IS_MAC ? e.metaKey : e.ctrlKey);
+  function stationFromEvent(e, w) {
+    const t = e.target.closest?.('[data-station]');
+    return (t && stationById(t.dataset.station)) || stationAtPoint(w);
+  }
+  // Right-click and Shift-click: edit the station here, or add one (splitting any connection through the point).
+  function secondaryAt(e) {
+    clearTimeout(ui.popTimer);
+    const w = toWorld(e), g = snap(w);
+    const st = stationFromEvent(e, w) || stationAt(g);
+    if (ui.drawing) { finishAt(st ? [st.x, st.y] : g); return; }
+    if (st) { setSel([st.id]); openStationPop(st, false); return; }
+    addStationAt(g);
+  }
+  function addStationAt(g) {
+    commit();
+    const st = createStation(g);
+    splitConnectionsAt(st);
+    setSel([st.id]);
+    renderLines();
+    changed();
+    openStationPop(st, true);
+  }
+  // A new station on an existing connection splits it in two, keeping its shape.
+  function splitConnectionsAt(st) {
+    const g = [st.x, st.y];
+    const out = [];
+    for (const c of doc.connections) {
+      const i = c.path.findIndex((p, k) => k > 0 && k < c.path.length - 1 && eq(p, g));
+      if (i < 0) { out.push(c); continue; }
+      out.push({ ...c, to: st.id, path: c.path.slice(0, i + 1) }, { ...c, id: uid(), from: st.id, path: c.path.slice(i) });
+    }
+    doc.connections = out;
+  }
 
   function startPan(e) {
     ui.drag = { type: 'pan', start: [e.clientX, e.clientY], origin: [ui.view.x, ui.view.y] };
@@ -1133,11 +1217,11 @@
       return;
     }
     const overHandle = !!e.target.closest?.('[data-handle]');
-    svg.classList.toggle('on-station', !overHandle && !!stationAtPoint(w));
+    svg.classList.toggle('on-station', !overHandle && !!stationFromEvent(e, w));
     if (!prevHover || !eq(prevHover, ui.hover)) renderOverlay();
   });
 
-  svg.addEventListener('pointerup', () => {
+  svg.addEventListener('pointerup', (e) => {
     const d = ui.drag;
     ui.drag = null;
     svg.classList.remove('panning', 'moving');
@@ -1145,10 +1229,14 @@
     if (d.type === 'pan') saveUI();
     else if (d.type === 'marquee') {
       ui.marquee = null;
+      if (!d.moved && d.shift) { selChanged(); secondaryAt(e); return; }
       if (!d.moved && !d.additive) ui.sel = emptySel();
       selChanged();
-    } else if (d.type === 'move' && !d.moved && d.wasSelected && selCount() > 1) {
-      setSel([d.id]);
+    } else if (d.type === 'move' && !d.moved) {
+      if (d.wasSelected && selCount() > 1) setSel([d.id]);
+      // Wait out a possible double-click (which starts a connection) before opening the editor.
+      clearTimeout(ui.popTimer);
+      ui.popTimer = setTimeout(() => { const st = stationById(d.id); if (st && !ui.drawing) openStationPop(st, false, false); }, 240);
     } else if (d.type === 'handle') {
       renderOverlay();
     }
@@ -1168,7 +1256,7 @@
     const c = singleConn();
     if (handle && c) {
       const [kind, i] = handle.dataset.handle.split(':');
-      if (kind !== 'corner') return;
+      if (kind !== 'corner') { editPath(c); return; }
       const C = corners(c.path);
       C.splice(+i, 1);
       const path = pathFromCorners(C.filter((p, k) => k === 0 || !eq(p, C[k - 1])));
@@ -1178,30 +1266,18 @@
       changed();
       return;
     }
-    const st = stationAtPoint(w);
+    clearTimeout(ui.popTimer);
+    const st = stationFromEvent(e, w);
     if (st) { startDrawing(st.id); return; }
-    if (e.target.closest?.('[data-conn]') || e.target.closest?.('[data-legend]')) return;
-    commit();
-    const ns = createStation(snap(w));
-    setSel([ns.id]);
-    changed();
-    openStationPop(ns, true);
+    const hit = e.target.closest?.('[data-conn]');
+    if (hit) { editPath(connById(hit.dataset.conn)); return; }
+    if (e.target.closest?.('[data-legend]')) return;
+    addStationAt(snap(w));
   });
 
   svg.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    const w = toWorld(e);
-    const g = snap(w);
-    const st = stationAtPoint(w) || stationAt(g);
-    if (ui.drawing) { finishAt(st ? [st.x, st.y] : g); return; }
-    if (st) {
-      openStationPop(st, false);
-    } else {
-      commit();
-      const ns = createStation(g);
-      changed();
-      openStationPop(ns, true);
-    }
+    secondaryAt(e);
   });
 
   // Trackpad-friendly: scroll pans, pinch or ⌘/Ctrl+scroll zooms.
@@ -1257,6 +1333,7 @@
       e.preventDefault();
       if (ui.drawing) {
         const dr = ui.drawing;
+        if (dr.target && stationById(dr.target)) { finishDrawing(stationById(dr.target)); return; }
         if (dr.cursor && !stationAt(dr.path[dr.path.length - 1])) addWaypoint(dr.cursor);
         finishAt(dr.path[dr.path.length - 1]);
       } else if (singleStation()) {
@@ -1317,7 +1394,7 @@
     dirGrid.appendChild(b);
   });
 
-  function openStationPop(st, isNew) {
+  function openStationPop(st, isNew, focus = true) {
     ui.editStation = st.id;
     if (!ui.sel.stations.has(st.id) || selCount() > 1) setSel([st.id]);
     $('#stName').value = st.name;
@@ -1332,8 +1409,10 @@
     autosize($('#stName'));
     renderOverlay();
     const input = $('#stName');
-    input.focus();
-    if (isNew) input.select();
+    if (focus) {
+      input.focus();
+      if (isNew) input.select();
+    }
   }
   function positionPop(st) {
     const G = doc.style.gridSize;
@@ -1388,6 +1467,7 @@
     changed();
   });
   $$('[data-close]', pop).forEach((b) => b.addEventListener('click', closeStationPop));
+  $('#stDraw').addEventListener('click', () => { const id = ui.editStation; closeStationPop(); if (id) startDrawing(id); });
 
   // ---------------------------------------------------------------------------
   // Inspector (selection panel)
@@ -1405,7 +1485,7 @@
     el.hidden = false;
     const c = singleConn(), st = singleStation();
     if (c) connInspector(el, c);
-    else if (st) stationInspector(el, st);
+    else if (st) { el.hidden = true; return; }
     else multiInspector(el);
     $('#inClose').onclick = () => setSel();
   }
@@ -1429,14 +1509,14 @@
         <span class="bundle-pos">${size > 1 ? `Track ${pos + 1} of ${size} where it runs alongside other connections` : 'Not sharing a corridor with any other connection'}</span>
       </div>
       <div class="btn-row">
-        <button class="btn small" id="inRetrace" title="Draw a new path for this connection">Redraw</button>
+        <button class="btn small" id="inRetrace" title="Edit the path (or double-click the connection)">Edit path</button>
         <button class="btn small" id="inReverse" title="Swap start and end">Reverse</button>
         <button class="btn small danger" id="inDelete">Delete</button>
       </div>`;
     $('#inLine').onchange = (e) => { commit(); c.lineId = e.target.value; setActiveLine(c.lineId); changed(); };
     $('#inPrev').onclick = () => shiftInBundle(c, -1);
     $('#inNext').onclick = () => shiftInBundle(c, 1);
-    $('#inRetrace').onclick = () => startDrawing(c.from, { replaceId: c.id, lineId: c.lineId });
+    $('#inRetrace').onclick = () => editPath(c);
     $('#inReverse').onclick = () => { commit(); [c.from, c.to] = [c.to, c.from]; c.path.reverse(); changed(); };
     $('#inDelete').onclick = deleteSelection;
   }
@@ -1505,7 +1585,7 @@
       const active = l.id === ui.activeLineId;
       return `<div class="line-item ${active ? 'active' : ''}" data-id="${l.id}">
         <div class="line-row">
-          <span class="line-key">${i < 9 ? i + 1 : ''}</span>
+          <span class="grip" title="Drag to reorder${i < 9 ? ` · press ${i + 1} to make active` : ''}"><svg viewBox="0 0 24 24"><circle cx="9" cy="6" r="1.4"/><circle cx="15" cy="6" r="1.4"/><circle cx="9" cy="12" r="1.4"/><circle cx="15" cy="12" r="1.4"/><circle cx="9" cy="18" r="1.4"/><circle cx="15" cy="18" r="1.4"/></svg></span>
           <label class="swatch" style="background:${l.color}" title="Colour"><input type="color" value="${l.color}" data-f="color"></label>
           <input class="line-name" value="${esc(l.name)}" data-f="name" spellcheck="false" aria-label="Line name">
           <span class="line-count" title="Connections">${counts[l.id] || 0}</span>
@@ -1516,10 +1596,9 @@
             <label class="field grow"><span>Style</span><select data-f="style">${Object.entries(LINE_STYLES).map(([k, v]) => `<option value="${k}" ${l.style === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
             <label class="check"><input type="checkbox" data-f="legend" ${l.legend !== false ? 'checked' : ''}> In legend</label>
           </div>
+          <label class="check" title="Connections of this line that share track are drawn as one line that splits where their paths diverge, instead of side by side"><input type="checkbox" data-f="merge" ${l.merge ? 'checked' : ''}> Merge shared track into branches</label>
           <div class="actions">
             <div>
-              <button class="icon-btn small" data-act="up" title="Move up" ${i === 0 ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></svg></button>
-              <button class="icon-btn small" data-act="down" title="Move down" ${i === doc.lines.length - 1 ? 'disabled' : ''}><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
               <button class="icon-btn small" data-act="dup" title="Duplicate line"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg></button>
             </div>
             <button class="btn small ghost danger" data-act="delete">Delete line</button>
@@ -1530,6 +1609,7 @@
 
     $$('.line-item', list).forEach((item) => {
       const l = lineById(item.dataset.id);
+      $('.grip', item).addEventListener('pointerdown', (e) => startLineDrag(e, item));
       item.addEventListener('pointerdown', (e) => {
         if (l.id === ui.activeLineId) return;
         const field = e.target.closest('[data-f]')?.dataset.f;
@@ -1549,7 +1629,7 @@
         const ev = inp.type === 'checkbox' || inp.tagName === 'SELECT' ? 'change' : 'input';
         live(inp, ev, () => {
           if (f === 'width') { l.width = +inp.value; inp.nextElementSibling.textContent = l.width + 'px'; }
-          else if (f === 'legend') l.legend = inp.checked;
+          else if (f === 'legend' || f === 'merge') l[f] = inp.checked;
           else if (f === 'color') { l.color = inp.value; inp.parentElement.style.background = inp.value; }
           else l[f] = inp.value;
           if (f === 'style') l.legend = inp.value !== 'transfer';
@@ -1559,6 +1639,51 @@
       });
       $$('[data-act]', item).forEach((btn) => btn.addEventListener('click', () => lineAction(l, btn.dataset.act)));
     });
+  }
+
+  // Drag a line by its grip to reorder (the order is also the legend order).
+  function startLineDrag(e, item) {
+    e.preventDefault();
+    e.stopPropagation();
+    const items = $$('.line-item', $('#lineList'));
+    const from = items.indexOf(item);
+    const rects = items.map((el) => el.getBoundingClientRect());
+    const shift = rects[from].height + 6;
+    const y0 = e.clientY;
+    let to = from;
+    item.classList.add('dragging');
+    document.body.classList.add('reordering');
+    const move = (ev) => {
+      const dy = ev.clientY - y0;
+      item.style.transform = `translateY(${dy}px)`;
+      const cy = ev.clientY;
+      to = from;
+      rects.forEach((r, i) => {
+        const mid = r.top + r.height / 2;
+        if (i < from && cy < mid) to = Math.min(to, i);
+        if (i > from && cy > mid) to = Math.max(to, i);
+      });
+      items.forEach((el, i) => {
+        if (el === item) return;
+        const sh = from < to && i > from && i <= to ? -shift : to < from && i >= to && i < from ? shift : 0;
+        el.style.transform = sh ? `translateY(${sh}px)` : '';
+      });
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      document.body.classList.remove('reordering');
+      items.forEach((el) => { el.style.transform = ''; });
+      item.classList.remove('dragging');
+      if (to === from) return;
+      commit();
+      const [l] = doc.lines.splice(from, 1);
+      doc.lines.splice(to, 0, l);
+      renderLines();
+      changed();
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
   }
 
   function lineAction(l, act) {

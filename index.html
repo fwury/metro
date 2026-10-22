@@ -111,8 +111,11 @@
     </div>
   </div>
   <div class="pop-actions">
-    <button class="btn danger ghost" id="stDelete">Delete station</button>
-    <button class="btn primary" data-close>Done</button>
+    <button class="btn danger ghost" id="stDelete" title="Delete (⌫)">Delete</button>
+    <span class="pop-right">
+      <button class="btn" id="stDraw" title="Or double-click the station">Draw connection</button>
+      <button class="btn primary" data-close>Done</button>
+    </span>
   </div>
 </div>
 
@@ -156,38 +159,37 @@
       <div>
         <h4>Stations</h4>
         <ul>
-          <li><kbd>Double-click</kbd> or <kbd>right-click</kbd> empty grid to add a station</li>
-          <li><kbd>Right-click</kbd> a station (or select it and press <kbd>Enter</kbd>) to edit its name, label side and marker</li>
+          <li><kbd>Right-click</kbd>, <kbd>Shift</kbd>+click or <kbd>double-click</kbd> empty grid to add a station. On an existing connection, the station is inserted into it</li>
+          <li><kbd>Click</kbd> a station (or its name) to edit its name, label side and marker</li>
           <li><kbd>Drag</kbd> stations or nudge them with the <kbd>arrow keys</kbd> — connections follow</li>
         </ul>
         <h4>Connections</h4>
         <ul>
           <li><kbd>Double-click</kbd> a station to start a connection on the active line</li>
           <li><kbd>Click</kbd> grid points to add waypoints — the path runs along the grid between them and corners are rounded automatically</li>
-          <li><kbd>Double-click</kbd> a station to finish, or empty grid to finish at a new station (<kbd>Enter</kbd> works too)</li>
+          <li><kbd>Double-click</kbd> a station to finish, or empty grid to finish at a new station</li>
           <li>Hold <kbd>⌥/Alt</kbd> to flip which way the next bend goes; <kbd>Backspace</kbd> removes the last waypoint; <kbd>Esc</kbd> cancels</li>
-          <li>Select a connection to drag its waypoint handles, drag a <kbd>＋</kbd> to add a bend, double-click a handle to remove it</li>
+          <li><kbd>Double-click</kbd> a connection to edit its path, or select it and drag its handles</li>
         </ul>
       </div>
       <div>
         <h4>Selecting</h4>
         <ul>
-          <li><kbd>Click</kbd> to select, <kbd>Shift</kbd>+click to add to the selection</li>
+          <li><kbd>Click</kbd> to select, <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+click to add to the selection</li>
           <li><kbd>Drag</kbd> on empty space to select everything in a box</li>
           <li><kbd>⌘/Ctrl A</kbd> selects all, <kbd>Backspace</kbd> deletes, <kbd>Esc</kbd> deselects</li>
         </ul>
-        <h4>View</h4>
+        <h4>Lines</h4>
         <ul>
-          <li><kbd>Scroll</kbd> or <kbd>Space</kbd>+drag to pan</li>
-          <li><kbd>⌘/Ctrl</kbd>+scroll or pinch to zoom, <kbd>F</kbd> to fit the map</li>
-        </ul>
-        <h4>Shortcuts</h4>
-        <ul>
+          <li>Drag a line by its handle in the sidebar to reorder it</li>
+          <li>Turn on <b>Merge shared track</b> to draw a line's overlapping connections as one line that branches</li>
           <li><kbd>1</kbd>–<kbd>9</kbd> pick the active line</li>
-          <li><kbd>⌘/Ctrl Z</kbd> undo, <kbd>⇧⌘Z</kbd> redo</li>
-          <li><kbd>⌘/Ctrl S</kbd> save file, <kbd>⌘/Ctrl O</kbd> open, <kbd>⌘/Ctrl E</kbd> export</li>
         </ul>
-        <p class="muted small">Maps save automatically in this browser. Use <b>Save file</b> for a portable <code>.metro.json</code> copy.</p>
+        <h4>View &amp; files</h4>
+        <ul>
+          <li><kbd>Scroll</kbd> or <kbd>Space</kbd>+drag to pan; <kbd>⌘/Ctrl</kbd>+scroll or pinch to zoom; <kbd>F</kbd> fits the map</li>
+          <li><kbd>⌘/Ctrl Z</kbd> undo, <kbd>⇧⌘Z</kbd> redo, <kbd>⌘/Ctrl S</kbd> save file, <kbd>⌘/Ctrl O</kbd> open, <kbd>⌘/Ctrl E</kbd> export</li>
+        </ul>
       </div>
     </div>
     <div class="modal-actions">
